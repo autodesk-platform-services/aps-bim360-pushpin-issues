@@ -23,11 +23,22 @@ using Autodesk.Forge;
 using Newtonsoft.Json;
 using Microsoft.AspNetCore.Http;
 using System.Net;
+using Autodesk.Authentication;
+using Autodesk.Authentication.Model;
+using Autodesk.SDKManager;
+using System.Collections.Generic;
+using System.IO;
 
 namespace Bim360PushpinIssues.Controllers
 {
     public class OAuthController : ControllerBase
     {
+
+        AuthenticationClient authenticationClient = null!;
+        string client_id = Credentials.GetAppSetting("APS_CLIENT_ID");
+        string client_secret = Credentials.GetAppSetting("APS_CLIENT_SECRET");
+        string redirect_uri = Credentials.GetAppSetting("APS_CALLBACK_URL");
+
         [HttpGet]
         [Route("api/aps/oauth/token")]
         public async Task<AccessToken> GetPublicTokenAsync()
@@ -70,14 +81,17 @@ namespace Bim360PushpinIssues.Controllers
         [Route("api/aps/oauth/url")]
         public string GetOAuthURL()
         {
+            // Instantiate SDK manager as below.  
+            SDKManager sdkManager = SdkManagerBuilder
+                  .Create() // Creates SDK Manager Builder itself.
+                  .Build();
+
+            // Instantiate AuthenticationClient using the created SDK manager
+            authenticationClient = new AuthenticationClient(sdkManager);
             // prepare the sign in URL
-            Scope[] scopes = { Scope.DataRead };
-            ThreeLeggedApi _threeLeggedApi = new ThreeLeggedApi();
-            string oauthUrl = _threeLeggedApi.Authorize(
-              Credentials.GetAppSetting("APS_CLIENT_ID"),
-              oAuthConstants.CODE,
-              Credentials.GetAppSetting("APS_CALLBACK_URL"),
-              new Scope[] { Scope.DataRead, Scope.DataCreate, Scope.DataWrite, Scope.ViewablesRead,Scope.AccountRead });
+           
+            string oauthUrl = authenticationClient.Authorize(client_id, ResponseType.Code, redirect_uri, 
+                new List<Scopes>() { Scopes.DataRead, Scopes.DataCreate, Scopes.DataWrite, Scopes.ViewablesRead, Scopes.AccountRead });
 
             return oauthUrl;
         }
@@ -86,8 +100,12 @@ namespace Bim360PushpinIssues.Controllers
         [Route("api/aps/callback/oauth")] // see Web.Config APS_CALLBACK_URL variable
         public async Task<IActionResult> OAuthCallbackAsync(string code)
         {
-            // create credentials form the oAuth CODE
-            Credentials credentials = await Credentials.CreateFromCodeAsync(code, Response.Cookies);
+            // create credentials from the oAuth CODE
+
+           
+
+            _ = await Credentials.CreateFromCodeAsync(code, Response.Cookies);
+
 
             return Redirect("/");
         }
@@ -105,7 +123,10 @@ namespace Bim360PushpinIssues.Controllers
     /// </summary>
     public class Credentials
     {
+
+
         private const string APS_COOKIE = "APSApp";
+
 
         private Credentials() { }
         public string TokenInternal { get; set; }
@@ -113,28 +134,32 @@ namespace Bim360PushpinIssues.Controllers
         public string RefreshToken { get; set; }
         public DateTime ExpiresAt { get; set; }
 
+        public static AuthenticationClient authenticationClient = null;
+
         /// <summary>
         /// Perform the OAuth authorization via code
         /// </summary>
         /// <param name="code"></param>
         /// <returns></returns>
-        public static async Task<Credentials> CreateFromCodeAsync(string code, IResponseCookies cookies)
+        public static async Task<Credentials> CreateFromCodeAsync( string code,IResponseCookies cookies)
         {
-            ThreeLeggedApi oauth = new ThreeLeggedApi();
+            // Instantiate SDK manager as below.  
+            SDKManager sdkManager = SdkManagerBuilder
+                  .Create() // Creates SDK Manager Builder itself.
+                  .Build();
 
-            dynamic credentialInternal = await oauth.GettokenAsync(
-              GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"),
-              oAuthConstants.AUTHORIZATION_CODE, code, GetAppSetting("APS_CALLBACK_URL"));
+            // Instantiate AuthenticationClient using the created SDK manager
+            authenticationClient = new AuthenticationClient(sdkManager);
+            
+            dynamic credentialInternal = await authenticationClient.GetThreeLeggedTokenAsync(GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"), code, GetAppSetting("APS_CALLBACK_URL"));
 
-            dynamic credentialPublic = await oauth.RefreshtokenAsync(
-              GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"),
-              "refresh_token", credentialInternal.refresh_token, new Scope[] { Scope.ViewablesRead });
+            dynamic credentialPublic = await authenticationClient.GetRefreshTokenAsync(GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"), credentialInternal.RefreshToken, new List<Scopes> { Scopes.ViewablesRead });
 
             Credentials credentials = new Credentials();
-            credentials.TokenInternal = credentialInternal.access_token;
-            credentials.TokenPublic = credentialPublic.access_token;
-            credentials.RefreshToken = credentialPublic.refresh_token;
-            credentials.ExpiresAt = DateTime.Now.AddSeconds(credentialInternal.expires_in);
+            credentials.TokenInternal = credentialInternal.AccessToken;
+            credentials.TokenPublic = credentialPublic.AccessToken;
+            credentials.RefreshToken = credentialPublic._RefreshToken;
+            credentials.ExpiresAt = DateTime.Now.AddSeconds(credentialInternal.ExpiresIn);
 
             cookies.Append(APS_COOKIE, JsonConvert.SerializeObject(credentials));
 
@@ -171,20 +196,18 @@ namespace Bim360PushpinIssues.Controllers
         /// <returns></returns>
         private async Task RefreshAsync()
         {
-            ThreeLeggedApi oauth = new ThreeLeggedApi();
+           
+            dynamic credentialInternal =await  authenticationClient.GetRefreshTokenAsync(GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"), 
+                RefreshToken, new List<Scopes> { Scopes.DataRead, Scopes.DataCreate, Scopes.DataWrite, Scopes.AccountRead });
 
-            dynamic credentialInternal = await oauth.RefreshtokenAsync(
-              GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"),
-              "refresh_token", RefreshToken, new Scope[] { Scope.DataRead, Scope.DataCreate, Scope.DataWrite, Scope.AccountRead });
 
-            dynamic credentialPublic = await oauth.RefreshtokenAsync(
-              GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"),
-              "refresh_token", credentialInternal.refresh_token, new Scope[] { Scope.ViewablesRead });
+            dynamic credentialPublic = await authenticationClient.GetRefreshTokenAsync(GetAppSetting("APS_CLIENT_ID"), GetAppSetting("APS_CLIENT_SECRET"), 
+                credentialInternal.RefreshToken, new List<Scopes> { Scopes.ViewablesRead });
 
-            TokenInternal = credentialInternal.access_token;
-            TokenPublic = credentialPublic.access_token;
-            RefreshToken = credentialPublic.refresh_token;
-            ExpiresAt = DateTime.Now.AddSeconds(credentialInternal.expires_in);
+            TokenInternal = credentialInternal.AccessToken;
+            TokenPublic = credentialPublic.AccessToken;
+            RefreshToken = credentialPublic._RefreshToken;
+            ExpiresAt = DateTime.Now.AddSeconds(credentialInternal.ExpiresIn);
         }
 
         /// <summary>
@@ -194,5 +217,6 @@ namespace Bim360PushpinIssues.Controllers
         {
             return Environment.GetEnvironmentVariable(settingKey);
         }
+     
     }
 }
